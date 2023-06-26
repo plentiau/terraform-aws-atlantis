@@ -8,21 +8,21 @@ locals {
   atlantis_image = var.atlantis_image == "" ? "ghcr.io/runatlantis/atlantis:${var.atlantis_version}" : var.atlantis_image
   atlantis_url = "https://${coalesce(
     var.atlantis_fqdn,
-    element(concat(aws_route53_record.atlantis.*.fqdn, [""]), 0),
+    element(concat(aws_route53_record.atlantis[*].fqdn, [""]), 0),
     module.alb.lb_dns_name,
     "_"
   )}"
   atlantis_url_events = "${local.atlantis_url}/events"
 
-  # Include only one group of secrets - for github, gitlab or bitbucket
-  has_secrets = var.atlantis_gitlab_user_token != "" || var.atlantis_github_user_token != "" || var.atlantis_bitbucket_user_token != ""
+  # Include only one group of secrets - for github, github app,  gitlab or bitbucket
+  has_secrets = try(coalesce(var.atlantis_gitlab_user_token, var.atlantis_github_user_token, var.atlantis_github_app_key, var.atlantis_bitbucket_user_token) != "", false)
 
-  # token
-  secret_name_key        = local.has_secrets ? var.atlantis_gitlab_user_token != "" ? "ATLANTIS_GITLAB_TOKEN" : var.atlantis_github_user_token != "" ? "ATLANTIS_GH_TOKEN" : "ATLANTIS_BITBUCKET_TOKEN" : ""
-  secret_name_value_from = local.has_secrets ? var.atlantis_gitlab_user_token != "" ? var.atlantis_gitlab_user_token_ssm_parameter_name : var.atlantis_github_user_token != "" ? var.atlantis_github_user_token_ssm_parameter_name : var.atlantis_bitbucket_user_token_ssm_parameter_name : ""
+  # token/key
+  secret_name_key        = local.has_secrets ? var.atlantis_gitlab_user_token != "" ? "ATLANTIS_GITLAB_TOKEN" : var.atlantis_github_user_token != "" ? "ATLANTIS_GH_TOKEN" : var.atlantis_github_app_key != "" ? "ATLANTIS_GH_APP_KEY" : "ATLANTIS_BITBUCKET_TOKEN" : ""
+  secret_name_value_from = local.has_secrets ? var.atlantis_gitlab_user_token != "" ? var.atlantis_gitlab_user_token_ssm_parameter_name : var.atlantis_github_user_token != "" ? var.atlantis_github_user_token_ssm_parameter_name : var.atlantis_github_app_key != "" ? var.atlantis_github_app_key_ssm_parameter_name : var.atlantis_bitbucket_user_token_ssm_parameter_name : ""
 
   # webhook
-  secret_webhook_key = local.has_secrets || var.atlantis_github_webhook_secret != "" ? var.atlantis_gitlab_user_token != "" ? "ATLANTIS_GITLAB_WEBHOOK_SECRET" : var.atlantis_github_user_token != "" || var.atlantis_github_webhook_secret != "" ? "ATLANTIS_GH_WEBHOOK_SECRET" : "ATLANTIS_BITBUCKET_WEBHOOK_SECRET" : ""
+  secret_webhook_key = local.has_secrets || var.atlantis_github_webhook_secret != "" ? var.atlantis_gitlab_user_token != "" ? "ATLANTIS_GITLAB_WEBHOOK_SECRET" : var.atlantis_github_user_token != "" || var.atlantis_github_webhook_secret != "" ? "ATLANTIS_GH_WEBHOOK_SECRET" : var.atlantis_github_app_key != "" || var.atlantis_github_webhook_secret != "" ? "ATLANTIS_GH_WEBHOOK_SECRET" : "ATLANTIS_BITBUCKET_WEBHOOK_SECRET" : ""
 
   # determine if the alb has authentication enabled, otherwise forward the traffic unauthenticated
   alb_authentication_method = length(keys(var.alb_authenticate_oidc)) > 0 ? "authenticate-oidc" : length(keys(var.alb_authenticate_cognito)) > 0 ? "authenticate-cognito" : "forward"
@@ -78,6 +78,14 @@ locals {
       name  = "ATLANTIS_HIDE_PREV_PLAN_COMMENTS"
       value = var.atlantis_hide_prev_plan_comments
     },
+    {
+      name  = "ATLANTIS_GH_APP_ID"
+      value = var.atlantis_github_app_id
+    },
+    {
+      name  = "ATLANTIS_WRITE_GIT_CREDS"
+      value = var.atlantis_write_git_creds
+    }
   ]
 
   # ECS task definition
@@ -151,7 +159,7 @@ resource "aws_ssm_parameter" "webhook" {
 
   name  = var.webhook_ssm_parameter_name
   type  = "SecureString"
-  value = coalesce(var.atlantis_github_webhook_secret, join("", random_id.webhook.*.hex))
+  value = coalesce(var.atlantis_github_webhook_secret, join("", random_id.webhook[*].hex))
 
   tags = local.tags
 }
@@ -186,6 +194,16 @@ resource "aws_ssm_parameter" "atlantis_bitbucket_user_token" {
   tags = local.tags
 }
 
+resource "aws_ssm_parameter" "atlantis_github_app_key" {
+  count = var.atlantis_github_app_key != "" ? 1 : 0
+
+  name  = var.atlantis_github_app_key_ssm_parameter_name
+  type  = "SecureString"
+  value = var.atlantis_github_app_key
+
+  tags = local.tags
+}
+
 ################################################################################
 # VPC
 ################################################################################
@@ -203,8 +221,8 @@ module "vpc" {
   private_subnets = var.private_subnets
   public_subnets  = var.public_subnets
 
-  enable_nat_gateway   = true
-  single_nat_gateway   = true
+  enable_nat_gateway   = var.enable_nat_gateway
+  single_nat_gateway   = var.single_nat_gateway
   enable_dns_hostnames = !var.enable_ephemeral_storage
 
   manage_default_security_group  = var.manage_default_security_group
@@ -224,9 +242,10 @@ module "alb" {
   name     = var.name
   internal = var.internal
 
-  vpc_id          = local.vpc_id
-  subnets         = local.public_subnet_ids
-  security_groups = flatten([module.alb_https_sg.security_group_id, module.alb_http_sg.security_group_id, var.security_group_ids])
+  enable_cross_zone_load_balancing = var.alb_enable_cross_zone_load_balancing
+  vpc_id                           = local.vpc_id
+  subnets                          = local.public_subnet_ids
+  security_groups                  = flatten([module.alb_https_sg.security_group_id, module.alb_http_sg.security_group_id, var.security_group_ids])
 
   access_logs = {
     enabled = var.alb_logging_enabled
@@ -347,8 +366,7 @@ module "alb_http_sg" {
 
   ingress_cidr_blocks      = sort(compact(concat(var.allow_github_webhooks ? var.github_webhooks_cidr_blocks : [], var.alb_ingress_cidr_blocks)))
   ingress_ipv6_cidr_blocks = sort(compact(concat(var.allow_github_webhooks ? var.github_webhooks_ipv6_cidr_blocks : [], var.alb_ingress_ipv6_cidr_blocks)))
-
-  tags = merge(local.tags, var.alb_http_security_group_tags)
+  tags                     = merge(local.tags, var.alb_http_security_group_tags)
 }
 
 module "atlantis_sg" {
@@ -375,7 +393,7 @@ module "atlantis_sg" {
 }
 
 module "efs_sg" {
-  source  = "terraform-aws-modules/security-group/aws//modules/nfs"
+  source  = "terraform-aws-modules/security-group/aws"
   version = "v4.8.0"
   count   = var.enable_ephemeral_storage ? 0 : 1
 
@@ -383,7 +401,6 @@ module "efs_sg" {
   vpc_id      = local.vpc_id
   description = "Security group allowing access to the EFS storage"
 
-  ingress_cidr_blocks = [var.cidr]
   ingress_with_source_security_group_id = [{
     rule                     = "nfs-tcp",
     source_security_group_id = module.atlantis_sg.security_group_id
@@ -403,7 +420,7 @@ module "acm" {
 
   domain_name = var.acm_certificate_domain_name == "" ? join(".", [var.name, var.route53_zone_name]) : var.acm_certificate_domain_name
 
-  zone_id = var.certificate_arn == "" ? element(concat(data.aws_route53_zone.this.*.id, [""]), 0) : ""
+  zone_id = var.certificate_arn == "" ? element(concat(data.aws_route53_zone.this[*].id, [""]), 0) : ""
 
   tags = local.tags
 }
@@ -448,13 +465,16 @@ resource "aws_efs_file_system" "this" {
 
   creation_token = coalesce(var.efs_file_system_token, var.name)
 
+  throughput_mode                 = var.efs_throughput_mode
+  provisioned_throughput_in_mibps = var.efs_provisioned_throughput_in_mibps
+
   encrypted = var.efs_file_system_encrypted
 }
 
 resource "aws_efs_mount_target" "this" {
   # we coalescelist in order to specify the resource keys when we create the subnets using the VPC or they're specified for us.  This works around the for_each value depends on attributes which can't be determined until apply error
   for_each = {
-    for k, v in zipmap(coalescelist(var.private_subnets, var.private_subnet_ids), local.private_subnet_ids) : k => v
+    for k, v in zipmap(coalescelist(var.private_subnets, var.private_subnet_ids, [""]), local.private_subnet_ids) : k => v
     if var.enable_ephemeral_storage == false
   }
 
@@ -534,6 +554,7 @@ resource "aws_iam_role" "ecs_task_execution" {
   assume_role_policy   = data.aws_iam_policy_document.ecs_tasks.json
   max_session_duration = var.max_session_duration
   permissions_boundary = var.permissions_boundary
+  path                 = var.path
 
   tags = local.tags
 }
@@ -551,10 +572,12 @@ data "aws_iam_policy_document" "ecs_task_access_secrets" {
     effect = "Allow"
 
     resources = flatten([
-      aws_ssm_parameter.webhook.*.arn,
-      aws_ssm_parameter.atlantis_github_user_token.*.arn,
-      aws_ssm_parameter.atlantis_gitlab_user_token.*.arn,
-      aws_ssm_parameter.atlantis_bitbucket_user_token.*.arn
+      aws_ssm_parameter.webhook[*].arn,
+      aws_ssm_parameter.atlantis_github_user_token[*].arn,
+      aws_ssm_parameter.atlantis_gitlab_user_token[*].arn,
+      aws_ssm_parameter.atlantis_bitbucket_user_token[*].arn,
+      aws_ssm_parameter.atlantis_github_app_key[*].arn,
+      try(var.repository_credentials["credentialsParameter"], [])
     ])
 
     actions = [
@@ -578,7 +601,7 @@ data "aws_iam_policy_document" "ecs_task_access_secrets_with_kms" {
 }
 
 resource "aws_iam_role_policy" "ecs_task_access_secrets" {
-  count = var.atlantis_github_user_token != "" || var.atlantis_gitlab_user_token != "" || var.atlantis_bitbucket_user_token != "" ? 1 : 0
+  count = local.has_secrets ? 1 : 0
 
   name = "ECSTaskAccessSecretsPolicy"
 
@@ -587,8 +610,8 @@ resource "aws_iam_role_policy" "ecs_task_access_secrets" {
   policy = element(
     compact(
       concat(
-        data.aws_iam_policy_document.ecs_task_access_secrets_with_kms.*.json,
-        data.aws_iam_policy_document.ecs_task_access_secrets.*.json,
+        data.aws_iam_policy_document.ecs_task_access_secrets_with_kms[*].json,
+        data.aws_iam_policy_document.ecs_task_access_secrets[*].json,
       ),
     ),
     0,

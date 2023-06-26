@@ -71,6 +71,18 @@ variable "azs" {
   default     = []
 }
 
+variable "enable_nat_gateway" {
+  description = "Should be true if you want to provision NAT Gateways for each of your private networks"
+  type        = bool
+  default     = true
+}
+
+variable "single_nat_gateway" {
+  description = "Should be true if you want to provision a single shared NAT Gateway across all of your private networks"
+  type        = bool
+  default     = true
+}
+
 variable "manage_default_security_group" {
   description = "Should be true to adopt and manage default security group"
   type        = bool
@@ -286,6 +298,12 @@ variable "atlantis_bitbucket_user_token_ssm_parameter_name" {
   default     = "/atlantis/bitbucket/user/token"
 }
 
+variable "atlantis_github_app_key_ssm_parameter_name" {
+  description = "Name of SSM parameter to keep atlantis_github_app_key"
+  type        = string
+  default     = "/atlantis/github/app/key"
+}
+
 variable "ssm_kms_key_arn" {
   description = "ARN of KMS key to use for encryption and decryption of SSM Parameters. Required only if your key uses a custom KMS key and not the default key"
   type        = string
@@ -303,6 +321,12 @@ variable "permissions_boundary" {
   description = "If provided, all IAM roles will be created with this permissions boundary attached."
   type        = string
   default     = null
+}
+
+variable "path" {
+  description = "If provided, all IAM roles will be created with this path."
+  type        = string
+  default     = "/"
 }
 
 variable "policies_arn" {
@@ -409,7 +433,7 @@ variable "custom_container_definitions" {
 
 variable "extra_container_definitions" {
   description = "A list of valid container definitions provided as a single valid JSON document. These will be provided as supplimentary to the main Atlantis container definition"
-  type        = list(any)
+  type        = any
   default     = []
 }
 
@@ -569,9 +593,27 @@ variable "atlantis_hide_prev_plan_comments" {
   default     = "false"
 }
 
+variable "atlantis_write_git_creds" {
+  description = "Write out a .git-credentials file with the provider user and token to allow cloning private modules over HTTPS or SSH"
+  type        = string
+  default     = "true"
+}
+
 # Github
 variable "atlantis_github_user" {
   description = "GitHub username that is running the Atlantis command"
+  type        = string
+  default     = ""
+}
+
+variable "atlantis_github_app_id" {
+  description = "GitHub App ID that is running the Atlantis command"
+  type        = string
+  default     = ""
+}
+
+variable "atlantis_github_app_key" {
+  description = "GitHub App private key that is running the Atlantis command"
   type        = string
   default     = ""
 }
@@ -713,6 +755,18 @@ variable "efs_file_system_token" {
   default     = ""
 }
 
+variable "efs_throughput_mode" {
+  description = "(Optional) Throughput mode for the file system. Defaults to bursting. Valid values: bursting, provisioned, or elastic. When using provisioned, also set provisioned_throughput_in_mibps."
+  type        = string
+  default     = null
+}
+
+variable "efs_provisioned_throughput_in_mibps" {
+  description = "The throughput, measured in MiB/s, that you want to provision for the file system. Only applicable with efs_throughput_mode set to provisioned"
+  type        = number
+  default     = null
+}
+
 variable "alb_ip_address_type" {
   description = "The type of IP addresses used by the subnets for your load balancer. The possible values are ipv4 and dualstack"
   type        = string
@@ -734,5 +788,11 @@ variable "runtime_platform" {
 variable "max_session_duration" {
   description = "Maximum session duration (in seconds) for ecs task execution role. Default is 3600."
   type        = number
+  default     = null
+}
+
+variable "alb_enable_cross_zone_load_balancing" {
+  description = "Whether cross-zone load balancing is enabled for the load balancer"
+  type        = bool
   default     = null
 }
